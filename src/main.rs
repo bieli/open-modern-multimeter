@@ -26,6 +26,7 @@ struct Config {
     channel_no: u32,
     unit: String,
     window_position: String,
+    enable_chart: String,
     color: Color,
 }
 
@@ -44,6 +45,7 @@ impl Config {
             .map_err(|_| "Invalid channel number".to_string())?;
         let unit = matches.value_of("unit").unwrap().to_string();
         let window_position = matches.value_of("window_position").unwrap().to_string();
+        let enable_chart = matches.value_of("enable_chart").unwrap().to_string();
         let color = match matches.value_of("color") {
             Some("r") => Color::RED,
             Some("g") => Color::GREEN,
@@ -57,6 +59,7 @@ impl Config {
             channel_no,
             unit,
             window_position,
+            enable_chart,
             color,
         })
     }
@@ -98,15 +101,12 @@ impl Display {
 
     fn draw(
         &self,
-        rl: &mut RaylibHandle,
-        thread: &RaylibThread,
+        d: &mut RaylibDrawHandle<'_>,
         channel_no: u32,
         value: &str,
         unit: &str,
         color: &Color,
     ) {
-        let mut d = rl.begin_drawing(thread);
-        d.clear_background(DISPLAY_BACKGROUND_COLOR);
         d.draw_text_ex(
             &self.font,
             &format!("CH:{}", channel_no),
@@ -201,6 +201,169 @@ fn read_serial_data(port: &mut dyn serialport::SerialPort, serial_buf: &mut Vec<
 }
 */
 
+struct Histogram {
+    bins: Vec<u32>,   // Frequency count for each bin
+    min_value: f32,   // Minimum value represented in the histogram
+    max_value: f32,   // Maximum value represented in the histogram
+    bin_count: usize, // Number of bins
+}
+
+impl Histogram {
+    fn new(min_value: f32, max_value: f32, bin_count: usize) -> Self {
+        Self {
+            bins: vec![0; bin_count],
+            min_value,
+            max_value,
+            bin_count,
+        }
+    }
+
+    fn add_value(&mut self, value: f32) {
+        if value < self.min_value || value > self.max_value {
+            return;
+        }
+        let bin_index = ((value - self.min_value) / (self.max_value - self.min_value)
+            * self.bin_count as f32) as usize;
+        self.bins[bin_index] += 1;
+    }
+
+/*
+    fn reset(&mut self) {
+        for bin in &mut self.bins {
+            *bin = 0;
+        }
+    }
+*/
+    fn normalized_bins(&self) -> Vec<f32> {
+        let max_count = *self.bins.iter().max().unwrap_or(&1) as f32;
+        self.bins
+            .iter()
+            .map(|&count| count as f32 / max_count)
+            .collect()
+    }
+}
+
+fn render_histogram(
+    d: &mut RaylibDrawHandle<'_>,
+    histogram: &Histogram,
+    pos_x: i32,
+    pos_y: i32,
+    screen_width: i32,
+    screen_height: i32,
+    bar_graph_thinkness: f32,
+    bar_color: Color,
+) {
+    let bin_width = (screen_width as f32 / histogram.bin_count as f32) * bar_graph_thinkness;
+    let normalized_bins = histogram.normalized_bins();
+
+    for (i, &bin_height) in normalized_bins.iter().enumerate() {
+        let x = i as f32 * bin_width;
+        let y = screen_height as f32 - (bin_height * 100.0);
+        let bar_height = screen_height as f32 - y;
+        d.draw_rectangle(
+            pos_x + x as i32,
+            pos_y + y as i32,
+            bin_width as i32,
+            bar_height as i32,
+            bar_color,
+        );
+    }
+}
+
+fn draw_chart(
+    d: &mut RaylibDrawHandle<'_>,
+    chart_pos: Vector2,
+    chart_width: i32,
+    chart_height: i32,
+    x_label: &str,
+    y_label: &str,
+    data_points: &[(f32, f32)],
+    point_circle_size: f32,
+    grid_step: f32,
+    point_color: Color,
+    axis_color: Color,
+    grid_color: Color,
+    label_color: Color,
+) {
+    let x_axis_y = chart_pos.y + chart_height as f32;
+    let y_axis_x = chart_pos.x;
+
+    d.draw_line(
+        y_axis_x as i32,
+        x_axis_y as i32,
+        (y_axis_x + chart_width as f32) as i32,
+        x_axis_y as i32,
+        axis_color,
+    );
+
+    d.draw_line(
+        y_axis_x as i32,
+        x_axis_y as i32,
+        y_axis_x as i32,
+        (x_axis_y - chart_height as f32) as i32,
+        axis_color,
+    );
+
+    d.draw_text(
+        x_label,
+        (chart_pos.x + chart_width as f32 / 2.0) as i32,
+        (x_axis_y + 10.0) as i32,
+        20,
+        label_color,
+    );
+
+    d.draw_text(
+        y_label,
+        (y_axis_x - 25.0) as i32,
+        (chart_pos.y + chart_height as f32 / 2.0) as i32,
+        20,
+        label_color,
+    );
+
+    let max_x = data_points
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(0.0 / 0.0, f32::max);
+    let max_y = data_points
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(0.0 / 0.0, f32::max);
+    let scale_x = chart_width as f32 / max_x.max(1.0);
+    let scale_y = chart_height as f32 / max_y.max(1.0);
+
+    for &(x, y) in data_points {
+        let scaled_x = chart_pos.x + x * scale_x;
+        let scaled_y = x_axis_y - y * scale_y;
+        d.draw_circle(
+            scaled_x as i32,
+            scaled_y as i32,
+            point_circle_size,
+            point_color,
+        );
+    }
+
+    for i in 1..=((chart_width as f32 / grid_step) as i32) {
+        let x = y_axis_x + i as f32 * grid_step;
+        d.draw_line(
+            x as i32,
+            x_axis_y as i32,
+            x as i32,
+            (x_axis_y - chart_height as f32) as i32,
+            grid_color,
+        );
+    }
+    for i in 1..=((chart_height as f32 / grid_step) as i32) {
+        let y = x_axis_y - i as f32 * grid_step;
+        d.draw_line(
+            y_axis_x as i32,
+            y as i32,
+            (y_axis_x + chart_width as f32) as i32,
+            y as i32,
+            grid_color,
+        );
+    }
+}
+
 fn main() {
     let matches = Command::new(APP_NAME)
         .about(
@@ -235,6 +398,12 @@ fn main() {
                 .required(true),
         )
         .arg(
+            Arg::new("enable_chart")
+                .help("Enable dynamic charts (h: histogram, l: linear) on bottom side of measurement screen.")
+                .required(false)
+                .default_value(""),
+        )
+        .arg(
             Arg::new("color")
                 .help("Color of the display values: r for red, g for green, b for blue (default color is red if not specified)")
                 .required(false)
@@ -250,8 +419,13 @@ fn main() {
         ))
         .open();
 
+    let mut screen_height_size = SCREEN_HEIGHT;
+    if &config.enable_chart != "" {
+        screen_height_size = SCREEN_HEIGHT * 2;
+    }
+
     let (mut rl, thread) = raylib::init()
-        .size(SCREEN_WIDTH, SCREEN_HEIGHT)
+        .size(SCREEN_WIDTH, screen_height_size)
         .title(&APP_NAME)
         .vsync()
         .build();
@@ -274,10 +448,17 @@ fn main() {
     let font_file: &[u8] = include_bytes!("./7_Segment.ttf");
     let display = Display::new(font_file);
 
+    // Adjust min, max, and bin_count as needed
+    let mut histogram = Histogram::new(0.0, 10.0, 50);
+
+    let mut data_points = vec![];
+
     match port {
         Ok(mut port) => {
             let mut serial_buf: Vec<u8> = vec![0; SERIAL_BUFFER_SIZE.try_into().unwrap()];
+            let mut ts: f32 = 0.0;
             while !rl.window_should_close() {
+                ts += 1.0;
                 match port.read(serial_buf.as_mut_slice()) {
                     Ok(bytes_read) => {
                         io::stdout().write_all(&serial_buf[..bytes_read]).unwrap();
@@ -301,14 +482,55 @@ fn main() {
                     },
                     Err(_) => "Invalid Data From Serial Port".to_string(),
                 };
+                match value.parse::<f32>() {
+                    Ok(value_as_f32) => {
+                        histogram.add_value(value_as_f32);
+                        data_points.push((ts, value_as_f32));
+                    }
+                    Err(e) => {
+                        eprintln!("Error parsing string to f32: {}", e);
+                    }
+                }
+                let mut d = rl.begin_drawing(&thread);
+                d.clear_background(DISPLAY_BACKGROUND_COLOR);
                 display.draw(
-                    &mut rl,
-                    &thread,
+                    &mut d,
                     config.channel_no,
                     &value,
                     &config.unit,
                     &config.color,
                 );
+
+                if &config.enable_chart == "h" {
+                    render_histogram(
+                        &mut d,
+                        &histogram,
+                        (SCREEN_WIDTH / 2) as i32 - 50,
+                        -30,
+                        SCREEN_WIDTH,
+                        screen_height_size,
+                        0.3,
+                        Color::DARKGRAY, //config.color
+                    );
+                }
+
+                if &config.enable_chart == "l" {
+                    draw_chart(
+                        &mut d,
+                        Vector2::new(40.0, 150.0),
+                        SCREEN_WIDTH,
+                        100,
+                        "T [ms]",
+                        "V",
+                        &data_points,
+                        2.0,
+                        50.0,
+                        Color::RED,
+                        Color::GRAY,
+                        Color::DARKGRAY,
+                        Color::GRAY,
+                    );
+                }
 
                 /*
                                 //TODO: NEED FIX: below refactoring have blinking effect on screen, so it's known bug ... waiting for hero! ;-)
