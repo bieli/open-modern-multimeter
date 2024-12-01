@@ -9,10 +9,13 @@ In general, this is simple tool for visualization data values for learning and f
 
 ### What you can see in UI in this program
 
+#### Standard multimeter view with values
 ![Example of DC voltage measurements from quite precission instrument](assets/github.com--bieli--open-modern-multimeter--screenshot--001.png)
 
+#### Extended multimeter view with linear chart
 ![Example of DC voltage measurements with histogram statistics chart](assets/github.com--bieli--open-modern-multimeter--screenshot--002.png)
 
+#### Extended multimeter view with histogram statistics chart
 ![Example of DC voltage measurements with linear chart](assets/github.com--bieli--open-modern-multimeter--screenshot--003.png)
 
 ## How to run
