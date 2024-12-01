@@ -29,7 +29,7 @@ $ ./target/release/open-modern-multimeter --help
 
 ## Features and arguments list in program
 
-``bash
+```bash
 $ ./target/release/open-modern-multimeter --help
 Open Modern Multimeter 
 Reads values from an external multimeter via a serial port and displays measurement values in
