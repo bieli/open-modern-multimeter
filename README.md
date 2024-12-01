@@ -11,6 +11,10 @@ In general, this is simple tool for visualization data values for learning and f
 
 ![Example of DC voltage measurements from quite precission instrument](assets/github.com--bieli--open-modern-multimeter--screenshot--001.png)
 
+![Example of DC voltage measurements with histogram statistics chart](assets/github.com--bieli--open-modern-multimeter--screenshot--002.png)
+
+![Example of DC voltage measurements with linear chart](assets/github.com--bieli--open-modern-multimeter--screenshot--003.png)
+
 ## How to run
 
 ### From exists Makefile
@@ -36,7 +40,7 @@ Reads values from an external multimeter via a serial port and displays measurem
 real-time in a UI
 
 USAGE:
-    open-modern-multimeter <port> <baud> <channel_no> <unit> <window_position> [color]
+    open-modern-multimeter <port> <baud> <channel_no> <unit> <window_position> [ARGS]
 
 ARGS:
     <port>               The device path to the serial port
@@ -46,6 +50,8 @@ ARGS:
     <window_position>    Setting up program window position on the screen <x_pos>_<y_pos>, where
                          x_pos and y_pos are in range {1..4} (i.e. 3_3 in the middle of the
                          screen)
+    <enable_chart>       Enable dynamic charts (h: histogram, l: linear) on bottom side of
+                         measurement screen. [default: ]
     <color>              Color of the display values: r for red, g for green, b for blue
                          (default color is red if not specified) [default: r]
 
