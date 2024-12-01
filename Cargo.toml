@@ -1,0 +1,10 @@
+[package]
+name = "open-modern-multimeter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+raylib = "3.7.0"
+serialport = "4.6.0"
+clap = { version = "3.1.6", features = ["derive"] }
+
