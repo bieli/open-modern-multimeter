@@ -67,7 +67,7 @@ $ ./target/release/open-modern-multimeter --help
 ```bash
 $ sudo socat PTY,link=/dev/ttyS10 PTY,link=/dev/ttyS111
 $ sudo chmod a+wrx /dev/ttyS111
-$ cargo run /dev/ttyS111 115200 1 VDC 3_3
+$ cargo run -- --port '/dev/ttyUSB0' --baud 115200 --channel_no 1 --unit VDC --window_position 4_4 --scpi_protocol_enabled 1 --enable_chart l --enable_csv_logger 0
 ```
 If you would like to use real null-modem emulator running on Linux kernel level (with real timers), please use this [Linux driver for nullmodem](https://github.com/pitti98/nullmodem).
 
