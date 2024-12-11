@@ -5,6 +5,9 @@ use std::ffi::CString;
 use std::io::{self, Write};
 use std::ptr::null_mut;
 use std::time::Duration;
+use csv::WriterBuilder;
+use std::fs::OpenOptions;
+use chrono::prelude::*;
 
 const SCREEN_WIDTH: i32 = 900;
 const SCREEN_HEIGHT: i32 = 150;
@@ -15,23 +18,27 @@ const DISPLAY_FONT_SIZE_140: f32 = 140.0;
 const DISPLAY_CHANNEL_COLOR: Color = Color::WHITE;
 const DISPLAY_BACKGROUND_COLOR: Color = Color::BLACK;
 
-const SERIAL_BUFFER_SIZE: i32 = 1000;
+const SERIAL_BUFFER_SIZE: i32 = 32;
 const SERIAL_TIMEOUT_MILISEC: i32 = 10;
-
+const SCPI_MEAS_CMD_OWON: &[u8; 6] = b"MEAS?\n";
+const SCPI_MEAS_CMD_AGILENT: &[u8; 14] = b"MEAS:VOLT:DC?\n"; // before SYST:REM
 const APP_NAME: &str = "Open Modern Multimeter";
 
-struct Config {
+#[derive(Debug)]
+pub struct Config {
     port_name: String,
     baud_rate: u32,
     channel_no: u32,
     unit: String,
     window_position: String,
+    scpi_protocol_enabled: bool,
     enable_chart: String,
     color: Color,
+    enable_csv_logger: bool,
 }
 
 impl Config {
-    fn new(matches: &clap::ArgMatches) -> Result<Self, String> {
+    pub fn new(matches: &clap::ArgMatches) -> Result<Self, String> {
         let port_name = matches.value_of("port").unwrap().to_string();
         let baud_rate = matches
             .value_of("baud")
@@ -52,6 +59,16 @@ impl Config {
             Some("b") => Color::BLUE,
             _ => Color::RED,
         };
+        let scpi_protocol_enabled = match matches.value_of("scpi_protocol_enabled") {
+            Some("1") => true,
+            Some("0") => false,
+            _ => false,
+        };
+        let enable_csv_logger = match matches.value_of("enable_csv_logger") {
+            Some("1") => true,
+            Some("0") => false,
+            _ => false,
+        };
 
         Ok(Config {
             port_name,
@@ -59,8 +76,10 @@ impl Config {
             channel_no,
             unit,
             window_position,
+            scpi_protocol_enabled,
             enable_chart,
             color,
+            enable_csv_logger,
         })
     }
 
@@ -227,13 +246,13 @@ impl Histogram {
         self.bins[bin_index] += 1;
     }
 
-/*
-    fn reset(&mut self) {
-        for bin in &mut self.bins {
-            *bin = 0;
+    /*
+        fn reset(&mut self) {
+            for bin in &mut self.bins {
+                *bin = 0;
+            }
         }
-    }
-*/
+    */
     fn normalized_bins(&self) -> Vec<f32> {
         let max_count = *self.bins.iter().max().unwrap_or(&1) as f32;
         self.bins
@@ -364,50 +383,169 @@ fn draw_chart(
     }
 }
 
-fn main() {
+fn join(a: &[u8]) -> String {
+    use std::fmt::Write;
+    a.iter().fold(String::new(), |mut s, &n| {
+        write!(s, "{}", (n as u8) as char).ok();
+        s
+    })
+}
+
+/// Converts a scientific notation value stored in `Vec<u8>` into a float representation in `Vec<u8>`.
+fn convert_scientific_to_float(input: &[u8]) -> Vec<u8> {
+    // Check for 'E' or 'e' in the input
+    if input.contains(&b'E') || input.contains(&b'e') {
+        // Attempt to parse the Vec<u8> as a UTF-8 string
+        match String::from_utf8(input.to_vec()) {
+            Ok(string) => match string.trim().parse::<f32>() {
+                Ok(num) => {
+                    // Format the parsed number back to Vec<u8>
+                    return format!("{:.8}", num).into_bytes();
+                }
+                Err(e) => {
+                    eprintln!("Failed to parse number: {}", e);
+                }
+            },
+            Err(e) => {
+                eprintln!("Invalid UTF-8 data: {}", e);
+            }
+        }
+    }
+    // If parsing fails or 'E'/'e' is not found, return the input unchanged
+    input.to_vec()
+}
+
+/// Converts a scientific notation value stored in `Vec<u8>` into a float representation as a `String`.
+fn convert_scientific_to_float2(input: &[u8]) -> Result<String, String> {
+    // Check for 'E' or 'e' in the input
+    if input.contains(&b'E') || input.contains(&b'e') {
+        // Attempt to parse the Vec<u8> as a UTF-8 string
+        match String::from_utf8(input.to_vec()) {
+            Ok(string) => match string.trim().parse::<f32>() {
+                Ok(num) => {
+                    // Format the parsed number back to a readable string
+                    let formatted = format!("{:.8}", num);
+                    return Ok(join(&formatted.into_bytes())); // Return owned String
+                }
+                Err(e) => {
+                    return Err(format!("Failed to parse number: {}", e));
+                }
+            },
+            Err(e) => {
+                return Err(format!("Invalid UTF-8 data: {}", e));
+            }
+        }
+    }
+    // If parsing fails or 'E'/'e' is not found, return the original as a String
+    Ok(join2(input))
+}
+
+/// Joins a byte array into a readable string format.
+fn join2(a: &[u8]) -> String {
+    use std::fmt::Write;
+    a.iter().fold(String::new(), |mut s, &n| {
+        write!(s, "{}", n as char).ok();
+        s
+    })
+}
+
+
+fn append_to_csv(file_path: &str, timestamp: i64, measurement: f32) -> Result<(), Box<dyn std::error::Error>> {
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file_path)?;
+    let mut wtr = WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(file);
+    wtr.write_record(&[timestamp.to_string(), measurement.to_string()])?;
+    wtr.flush()?;
+    
+    Ok(())
+}
+
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let now = Utc::now().timestamp_millis();
     let matches = Command::new(APP_NAME)
         .about(
             "Reads values from an external multimeter via a serial port and displays measurement values in real-time in a UI",
         )
+        .author("code base: https://github.com/bieli/open-modern-multimeter")
         .disable_version_flag(true)
         .arg(
             Arg::new("port")
+                .short('p')
+                .long("port")
                 .help("The device path to the serial port")
+                .takes_value(true)
                 .required(true),
         )
         .arg(
             Arg::new("baud")
+                .short('b')
+                .long("baud")
                 .help("The baud rate for communication")
+                .takes_value(true)
                 .required(true)
                 .validator(Config::valid_baud),
         )
         .arg(
             Arg::new("channel_no")
+                .short('n')
+                .long("channel_no")
                 .help("The channel number to display")
+                .takes_value(true)
                 .required(true)
                 .validator(Config::validate_number),
         )
         .arg(
             Arg::new("unit")
+                .short('u')
+                .long("unit")
                 .help("The unit of measurement")
+                .takes_value(true)
                 .required(true),
         )
         .arg(
             Arg::new("window_position")
+                .short('w')
+                .long("window_position")
                 .help("Setting up program window position on the screen <x_pos>_<y_pos>, where x_pos and y_pos are in range {1..4} (i.e. 3_3 in the middle of the screen)")
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::new("scpi_protocol_enabled")
+                .short('s')
+                .long("scpi_protocol_enabled")
+                .help("Setting up SCPI protocol for reading measurements from all laboratory multimeters (SCPI 'MEAS?' command send and parse response as measurement value; possible scentific representation of value)")
+                .takes_value(true)
                 .required(true),
         )
         .arg(
             Arg::new("enable_chart")
+                .short('e')
+                .long("enable_chart")
                 .help("Enable dynamic charts (h: histogram, l: linear) on bottom side of measurement screen.")
                 .required(false)
                 .default_value(""),
         )
         .arg(
             Arg::new("color")
+                .short('c')
+                .long("color")
                 .help("Color of the display values: r for red, g for green, b for blue (default color is red if not specified)")
                 .required(false)
                 .default_value("r"),
+        )
+        .arg(
+            Arg::new("enable_csv_logger")
+                .short('l')
+                .long("enable_csv_logger")
+                .help("Enable measurements logger data appender from every value presented in app. on display.")
+                .required(false)
+                .default_value(""),
         )
         .get_matches();
 
@@ -452,15 +590,31 @@ fn main() {
     let mut histogram = Histogram::new(0.0, 10.0, 50);
 
     let mut data_points = vec![];
+    
+    let csv_logger_file_name = format!("measurements_{}_{}.csv", now, config.channel_no);
 
     match port {
         Ok(mut port) => {
-            let mut serial_buf: Vec<u8> = vec![0; SERIAL_BUFFER_SIZE.try_into().unwrap()];
+            //let mut serial_buf: Vec<u8> = vec![0; SERIAL_BUFFER_SIZE.try_into().unwrap()];
             let mut ts: f32 = 0.0;
             while !rl.window_should_close() {
+                let mut serial_buf: Vec<u8> = vec![0; SERIAL_BUFFER_SIZE.try_into().unwrap()];
+                //serial_buf = [0; 0].to_vec();
                 ts += 1.0;
+                if config.scpi_protocol_enabled == true {
+                    match port.write(SCPI_MEAS_CMD_OWON) {
+                        Ok(_) => {}
+                        Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => (),
+                        Err(e) => {
+                            eprintln!("Error writing data to port (after SCPI cmd.): {:?}", e)
+                        }
+                    }
+                }
+
+                let mut bytes_read_val = 0;
                 match port.read(serial_buf.as_mut_slice()) {
                     Ok(bytes_read) => {
+                        bytes_read_val = bytes_read;
                         io::stdout().write_all(&serial_buf[..bytes_read]).unwrap();
                         io::stdout().flush().unwrap();
                     }
@@ -468,8 +622,43 @@ fn main() {
                     Err(e) => eprintln!("Error reading data from port: {:?}", e),
                 }
 
+                fn extract_first_part(input: &[u8]) -> Vec<u8> {
+                    if let Some(position) = input.windows(2).position(|window| window == b"\n") {
+                        input[..position].to_vec()
+                    } else {
+                        input.to_vec() // Return the full buffer if no "\r\n" is found
+                    }
+                }
+
+                //serial_buf = (&serial_buf[..bytes_read_val]).to_vec();
+                //if (serial_buf.is_empty()) {
+                //  continue;
+                //}
+                //serial_buf = b"0.123E-03\r\n".to_vec();
+                //serial_buf = b"1.011038E-01\n".to_vec();
+                //serial_buf = b"1.013807E-01\r\n1.013807E-01\r\n3807E-01\r\n1.013807E-01\r\n\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".to_vec();
+                //println!("serial_buf: {:#?}", join2(&serial_buf));
+                //serial_buf = extract_first_part(&serial_buf);
+                //println!("serial_buf: {:#?}", serial_buf);
+
                 let mut serial_buf_filtered = serial_buf.clone();
                 serial_buf_filtered.retain(|&x| x != 0);
+
+                //let serial_buf_filtered = convert_scientific_to_float(&serial_buf_filtered);
+
+                //println!("TO: {:?}", join(&convert_scientific_to_float(&serial_buf_filtered)));
+
+                // Convert scientific value
+                match convert_scientific_to_float2(&serial_buf_filtered) {
+                    Ok(result) => {
+                        //println!("TO: {}", result);
+                        serial_buf_filtered = result.into();
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {:?}", e);
+                        continue;
+                    }
+                }
 
                 if serial_buf_filtered.len() > 8 {
                     serial_buf_filtered.truncate(9);
@@ -482,8 +671,10 @@ fn main() {
                     },
                     Err(_) => "Invalid Data From Serial Port".to_string(),
                 };
+                let mut value_as_f32: f32 = 0.0;
                 match value.parse::<f32>() {
-                    Ok(value_as_f32) => {
+                    Ok(value_as_f32_tmp) => {
+                        value_as_f32 = value_as_f32_tmp;
                         histogram.add_value(value_as_f32);
                         data_points.push((ts, value_as_f32));
                     }
@@ -501,6 +692,11 @@ fn main() {
                     &config.color,
                 );
 
+                if config.enable_csv_logger && value_as_f32 != 0.0 {
+                  let now = Utc::now().timestamp_millis();
+                  append_to_csv(&csv_logger_file_name, now, value_as_f32)?;
+                }
+
                 if &config.enable_chart == "h" {
                     render_histogram(
                         &mut d,
@@ -510,7 +706,7 @@ fn main() {
                         SCREEN_WIDTH,
                         screen_height_size,
                         0.3,
-                        Color::DARKGRAY, //config.color
+                        Color::DARKGRAY,
                     );
                 }
 
@@ -550,4 +746,64 @@ fn main() {
             std::process::exit(1);
         }
     }
+    Ok(())
 }
+
+/*
+
+// working example of scientific to f32 conversion
+
+use std::fmt::Write;
+
+const SERIAL_BUFFER_SIZE: i32 = 1000;
+
+fn main() {
+    println!("{}", join(&vec![1, 2, 3]));
+
+    println!("Scientific values conversion in RUST!");
+
+    let serial_buf = b"0.123E-03\r\n".to_vec(); // Initialize directly
+    println!("FROM: {}", join(&serial_buf));
+
+    // Convert scientific value
+    match convert_scientific_to_float(&serial_buf) {
+        Ok(result) => println!("TO: {}", result),
+        Err(e) => eprintln!("Error: {}", e),
+    }
+    println!("END.")
+}
+
+/// Converts a scientific notation value stored in `Vec<u8>` into a float representation as a `String`.
+fn convert_scientific_to_float(input: &[u8]) -> Result<String, String> {
+    // Check for 'E' or 'e' in the input
+    if input.contains(&b'E') || input.contains(&b'e') {
+        // Attempt to parse the Vec<u8> as a UTF-8 string
+        match String::from_utf8(input.to_vec()) {
+            Ok(string) => match string.trim().parse::<f32>() {
+                Ok(num) => {
+                    // Format the parsed number back to a readable string
+                    let formatted = format!("{:.8}", num);
+                    return Ok(join(&formatted.into_bytes())); // Return owned String
+                }
+                Err(e) => {
+                    return Err(format!("Failed to parse number: {}", e));
+                }
+            },
+            Err(e) => {
+                return Err(format!("Invalid UTF-8 data: {}", e));
+            }
+        }
+    }
+    // If parsing fails or 'E'/'e' is not found, return the original as a String
+    Ok(join(input))
+}
+
+/// Joins a byte array into a readable string format.
+fn join(a: &[u8]) -> String {
+    a.iter().fold(String::new(), |mut s, &n| {
+        write!(s, "{}", n as char).ok();
+        s
+    })
+}
+
+*/

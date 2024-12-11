@@ -7,4 +7,5 @@ edition = "2021"
 raylib = "3.7.0"
 serialport = "4.6.0"
 clap = { version = "3.1.6", features = ["derive"] }
-
+csv = "1.1"
+chrono = "0.4"
